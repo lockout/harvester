@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+    harvester:
+        container_name: harvester
+        hostname: harvester
+        restart: on-failure
+        build: .
+        image: asia-northeast2-docker.pkg.dev/icscoe-2021/bb-docker-ar/harvester:latest
+        env_file:
+            - secrets.env
+        command: /harvester/harvester.py
+        networks:
+            - bnet
+
+networks:
+    bnet:
+        driver: bridge
