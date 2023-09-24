@@ -4,6 +4,7 @@ FROM python:alpine
 
 RUN apk -U upgrade
 RUN apk add --no-cache \
+	dumb-init \
         xvfb \
         chromium \
         chromium-chromedriver \
@@ -17,3 +18,5 @@ RUN mkdir log rep
 
 RUN pip install --upgrade pip
 RUN pip install -r dependencies
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]

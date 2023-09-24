@@ -5,6 +5,20 @@
 #
 # Licensed under the GNU General Public License version 3 (GPLv3)
 # Please see LICENSE file for more details
+__license__ = "gplv3"
+__author__ = "bb"
+__version__ = "0.27/0.4"
+
+# TODO:
+# 2. Add session handover between Selenium and Requests;
+# 3. Keyword detection and reporting (analyzer functionality);
+# 4. Single snapshot file identification by task name and ID (analyzer
+# functionality);
+# 5. Detect malicious file download url - no snapshot for those. Check if
+# file exists and may be downloaded, but no actual downloads. Later, download 
+# and calculate file hashes;
+# 6. if the target url is the file, its hash should be calculated and provided
+# for future analysis (VirusTotal API).
 
 import base64
 import logging
@@ -20,17 +34,21 @@ from uuid import uuid1
 from os import environ
 
 import ppdeep
+import requests
 from PIL import Image
 from pyvirtualdisplay.display import Display
 from google.cloud import storage
-from selenium import webdriver
 
+from selenium import webdriver
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
 
 def logger(logFile):
+    """
+    Initialize and start the logging
+    """
     logging.basicConfig(
         filename=logFile,
         encoding='utf-8',
@@ -83,6 +101,18 @@ def check_url(url):
     log.debug(f"Checking URL {origUrl} -> {url}") 
     return url
 
+def get_content_type(url):
+    """
+    Try to identify what is the content type of the target url.
+    Needed to distinguish between the URLs serving text/html and the ones
+    serving files.
+    """
+    try:
+        log.info("Detecting URL content-type")
+        requests.head(url).headers["Content-Type"]
+    except Exception as err:
+        return False
+
 def start_display(horizontalSize, verticalSize, backend="xvfb"):
     """
     Starts a virtual display for headless browser sessions
@@ -117,13 +147,25 @@ def get_selenium_driver(userAgent, horizontalSize, verticalSize):
      --disable-dev-shm-usage to disable /dev/shm usage on Dockerized
         environment, where /dev/shm is too small and results in Chrome,
         pages, or its tabs crashing
+    --webview-disable-safebrowsing-support disables Google Safe Browsing to
+        permit access to known compromised web resources
+    Additional flags, whcih may potentially improve the operation or access
+    to the URLs is under Testing flag, which may be enabled or disabled.
     """
     log.info("Initializing Selenium browser")
+    chromePath = "/usr/bin/chromium"
     options = webdriver.ChromeOptions()
+    options.binary_location = chromePath
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument(f"--user-agent={userAgent}")
+    testing = True
+    if testing:
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--start-maximized")
+        options.add_argument("--webview-disable-safebrowsing-support")
     if harvestPrivatemode:
         options.add_argument("--incognito")
         log.info("Browser private mode set")
@@ -153,9 +195,9 @@ def wait_loading(driver, timeout=10):
     Wait for the page to load.
     Assumes, that <div> element should be present on a loaded page.
     """
+    log.info("Browser wait for page element to load")
     wait = WebDriverWait(driver, timeout)
     wait.until(EC.presence_of_element_located((By.TAG_NAME, 'div')))
-    log.info("Browser wait for page element to load")
 
 def close_selenium_driver(driver):
     """
@@ -177,6 +219,7 @@ def get_ssl_fingerprint(url):
     """
     Exctract target website SSL certificate fingerprint
     """
+    log.info("Retrieving SSL certificate fingerprint")
     domain = urlparse(url).netloc
     try:
         sslConnection = ssl.create_connection((domain, 443)) # type: ignore
@@ -204,23 +247,32 @@ def get_selenium_content(driver, targetUrl):
     try:
         driver.get(targetUrl)
         wait_loading(driver)
+        currentUrl = driver.current_url
     except Exception as err:
         log.error(f"Browser content load error: {err}")
         return False
     else:
         if contentHtml:
             log.info("Retrieving page source and session cookies")
-            targetHtml = driver.page_source
-            targetCookies = driver.get_cookies()
+            try:
+                targetHtml = driver.page_source
+                targetCookies = driver.get_cookies()
+            except Exception as err:
+                log.error(err)
+                targetHtml, targetCookies = ("",) * 2
         else:
             targetHtml = ""
             targetCookies = ""
         if contentImage:
             log.info("Collecting page screenshot")
-            targetImageB64 = driver.get_screenshot_as_base64()
+            try:
+                targetImageB64 = driver.get_screenshot_as_base64()
+            except Exception as err:
+                log.error(err)
+                targetImageB64 = ""
         else:
             targetImageB64 = ""
-        return (targetHtml, targetCookies, targetImageB64)
+        return (targetHtml, targetCookies, targetImageB64, currentUrl)
 
 def compress_b64_image(imageB64, jpeg, quality):
     """
@@ -261,7 +313,7 @@ def json_report(reportFile):
     Compile and save the final JSON report
     """
     with open(reportFile, 'w') as file:
-        dump(sessionReport, file)
+        dump(sessionReport, file, indent=4)
 
 def load_profile(jsonFile):
     """
@@ -428,15 +480,19 @@ def snapshot(url, virtualDisplay=True):
         contentImageSize[0],
         contentImageSize[1]
         )
-    response = get_selenium_content(
-        browser,
-        url
-        )
+    if browser:
+        response = get_selenium_content(
+            browser,
+            url
+            )
+    else:
+        content, cookies, image, curl, headers = ("",) * 5
     if contentSsl:
         sslFingerprint = get_ssl_fingerprint(url)
     else:
         sslFingerprint = ""
-    close_selenium_driver(browser)
+    if browser:
+        close_selenium_driver(browser)
     if virtualDisplay:
         stop_display(display)
     if harvestTime:
@@ -447,6 +503,7 @@ def snapshot(url, virtualDisplay=True):
         content = response[0]
         cookies = response[1]
         image = response[2]
+        curl = response[3]
         if image and contentImageOptimize:
             image = compress_b64_image(
                 image,
@@ -455,7 +512,7 @@ def snapshot(url, virtualDisplay=True):
             )
         headers = "" # TODO: Transfer Selenium session to Requests
     else:
-        content, cookies, image, headers = ("", "", "", "")
+        content, cookies, image, curl, headers = ("",) * 5
     if content and contentSha256:
         hashSha256 = get_sha256(content)
     else:
@@ -465,24 +522,21 @@ def snapshot(url, virtualDisplay=True):
     else:
         hashSsdeep = ""
     interactReport = {
-        "meta" : [
-            url,
-            harvestUseragent,
-            headers,
-            cookies,
-            sslFingerprint,
-            hashSha256,
-            hashSsdeep,
-            [startTime, endTime]
-        ],
-        "content" : [
-            content,
-            image
-        ]
+        "url": url,
+        "curl": curl,
+        "useragent": harvestUseragent,
+        "http_headers": headers,
+        "http_cookies": cookies,
+        "ssl_fingerprint": sslFingerprint,
+        "sha256": hashSha256,
+        "fuzzyhash": hashSsdeep,
+        "time_frame": [startTime, endTime],
+        "http_content": content,
+        "http_image": image
     }
     assemble_report(interactReport)
 
-def google_bucket_auth(bucketName, serviceKey=None):
+def google_bucket_auth(bucketName=None, serviceKey=None):
     """
     Authenticate against Google Cloud Services and access the specified
     storage bucket, where agent profile is located and worker reports
@@ -495,6 +549,7 @@ def google_bucket_auth(bucketName, serviceKey=None):
     if serviceKey:
         client = storage.Client.from_service_account_json(serviceKey)
     else:
+        bucketName = environ.get("BUCKET")
         serviceEmail = environ.get("SERVICE_EMAIL")
         serviceKeyB64 = environ.get("SERVICE_KEY_B64").encode("utf8")
         serviceKey = base64.b64decode(serviceKeyB64).decode('utf8')
@@ -529,7 +584,7 @@ urlList = []
 
 if __name__ == "__main__":
     log = logger("log/harvester.log")
-    authBucket = google_bucket_auth("bb-harvester-bucket-0")
+    authBucket = google_bucket_auth()
     google_bucket_download(
         authBucket,
         "profile.json",
@@ -542,22 +597,19 @@ if __name__ == "__main__":
     cycle = 1
     while cycle <= taskCount:
         log.info(f"Session cycle:{cycle}/{taskCount}")
+        taskName = f"{workerId[1]}-{taskId}-{cycle}"
         sessionReport = {
             "task_meta" : {
-                "syntax_version" : "0.2",
-                "worker_id" : "",
-                "task_id" : "",
-                "timestamp" : 0
+                "syntax_version" : __version__.split('/')[1],
+                "worker_id" : workerId[0],
+                "task_id" : taskName,
+                "timestamp" : time()
             },
             "task_data" : []
             }
         for url in urlList:
             log.debug(f"Harvesting {url} from {urlList}")
             snapshot(url)
-        taskName = f"{workerId[1]}:{taskId}:{cycle}"
-        sessionReport["task_meta"]["worker_id"] = workerId[0]
-        sessionReport["task_meta"]["task_id"] = taskName
-        sessionReport["task_meta"]["timestamp"] = time()
         # Save session report to bucket
         json_report(f"rep/report_{taskName}.json")
         google_bucket_upload(

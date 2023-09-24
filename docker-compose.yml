@@ -6,12 +6,14 @@ services:
         hostname: harvester
         restart: on-failure
         build: .
-        image: asia-northeast2-docker.pkg.dev/icscoe-2021/bb-docker-ar/harvester:latest
+        image: asia-docker.pkg.dev/jsps-deploy/bb-docker-ar-1/harvester:latest
         env_file:
-            - secrets.env
+          - secrets/secrets.env
         command: /harvester/harvester.py
+        # command: tail -f /dev/null | /dev/null
+        shm_size: "2gb"
         networks:
-            - bnet
+          - bnet
 
 networks:
     bnet:
